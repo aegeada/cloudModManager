@@ -1,0 +1,28 @@
+# Binaries and compiled files
+/bin/
+/cmm
+/cmm_bin
+*.test
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Local Go SDK & Archives
+/go/
+*.tar.gz
+*.zip
+
+# Workspace & Agent artifacts
+/.agents/
+/.idea/
+/.vscode/
+
+# Minecraft runtime & Local test artifacts
+/mods/
+/config/
+/logs/
+
+# OS Files
+.DS_Store
+Thumbs.db
