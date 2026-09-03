@@ -25,7 +25,7 @@ test-tier3: build
 test-tier4: build
 	$(GO) test -v ./e2e/tier4/...
 
-VERSION ?= v1.0.0
+VERSION ?= v0.1.0
 
 cross-compile:
 	mkdir -p bin
