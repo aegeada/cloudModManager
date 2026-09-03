@@ -281,7 +281,7 @@ func (m *Manager) List() ([]ModStatus, error) {
 		if m.Client != nil && mod.Slug != "" {
 			if versions, err := m.Client.GetProjectVersions(mod.Slug, loaders, gameVersions, nil); err == nil && len(versions) > 0 {
 				latest := versions[0]
-				if latest.VersionNumber != "" && latest.VersionNumber != mod.GetVersion() {
+				if latest.VersionNumber != "" && IsNewerVersion(latest.VersionNumber, mod.GetVersion()) {
 					st.UpdateAvailable = true
 					st.LatestVersion = latest.VersionNumber
 				}
@@ -394,12 +394,53 @@ func (m *Manager) CheckUpdatesMulti(slugs []string, channel string, force bool) 
 			continue
 		}
 
-		latest := filtered[0]
-		if latest.VersionNumber != "" && latest.VersionNumber != mod.GetVersion() {
+		// Find index of currently installed version in the full project versions list
+		currVer := mod.GetVersion()
+		currVerID := mod.VersionID
+		currIndex := -1
+		for i, v := range versions {
+			if (currVerID != "" && strings.EqualFold(v.ID, currVerID)) || strings.EqualFold(v.VersionNumber, currVer) {
+				currIndex = i
+				break
+			}
+		}
+
+		// Look for the newest version in filtered channel that is strictly newer than current
+		var bestCandidate *modrinth.Version
+		for _, fv := range filtered {
+			if fv.VersionNumber == "" || strings.EqualFold(fv.VersionNumber, currVer) {
+				continue
+			}
+
+			// If current version was found in project versions list, candidate must be chronologically newer (index < currIndex)
+			if currIndex != -1 {
+				candIndex := -1
+				for i, v := range versions {
+					if v.ID == fv.ID {
+						candIndex = i
+						break
+					}
+				}
+				if candIndex >= currIndex {
+					// candidate was published before or at the same time as current; not an update!
+					continue
+				}
+			}
+
+			// SemVer comparison: candidate must be strictly newer than currVer
+			if !IsNewerVersion(fv.VersionNumber, currVer) {
+				continue
+			}
+
+			bestCandidate = &fv
+			break
+		}
+
+		if bestCandidate != nil {
 			candidates = append(candidates, UpdateCandidate{
 				Mod:           mod,
-				TargetVersion: latest,
-				Changelog:     latest.Changelog,
+				TargetVersion: *bestCandidate,
+				Changelog:     bestCandidate.Changelog,
 			})
 		}
 	}

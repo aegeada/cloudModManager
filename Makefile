@@ -25,6 +25,8 @@ test-tier3: build
 test-tier4: build
 	$(GO) test -v ./e2e/tier4/...
 
+VERSION ?= v1.0.0
+
 cross-compile:
 	mkdir -p bin
 	GOOS=linux GOARCH=arm64 $(GO) build -o bin/$(BINARY)-linux-arm64 ./cmd/cmm/
@@ -32,6 +34,12 @@ cross-compile:
 	GOOS=darwin GOARCH=arm64 $(GO) build -o bin/$(BINARY)-darwin-arm64 ./cmd/cmm/
 	GOOS=darwin GOARCH=amd64 $(GO) build -o bin/$(BINARY)-darwin-amd64 ./cmd/cmm/
 	GOOS=windows GOARCH=amd64 $(GO) build -o bin/$(BINARY)-windows-amd64.exe ./cmd/cmm/
+	cp bin/$(BINARY)-linux-arm64 bin/$(BINARY)-$(VERSION)-linux-arm64
+	cp bin/$(BINARY)-linux-amd64 bin/$(BINARY)-$(VERSION)-linux-amd64
+	cp bin/$(BINARY)-darwin-arm64 bin/$(BINARY)-$(VERSION)-darwin-arm64
+	cp bin/$(BINARY)-darwin-amd64 bin/$(BINARY)-$(VERSION)-darwin-amd64
+	cp bin/$(BINARY)-windows-amd64.exe bin/$(BINARY)-$(VERSION)-windows-amd64.exe
+
 
 clean:
 	rm -f $(BINARY)

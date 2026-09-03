@@ -102,3 +102,26 @@ version = "0.11.0"
 	// Notice of new loader
 	res.AssertStdoutContains("Notice: A new Fabric Loader version is available (v0.19.3)")
 }
+
+func TestUpdate_PreventDowngrade_HigherVersionInstalled(t *testing.T) {
+	ms := mockserver.New()
+	defer ms.Close()
+	ctx := harness.NewTestContext(t, ms.URL())
+
+	ctx.WriteFile("cmm.toml", `[profile]
+name = "Test"
+minecraft_version = "1.21.1"
+loader = "fabric"
+`)
+	// In mockserver, sodium latest is 1.0. If user already has 2.0.0, cmm update should NOT propose 1.0!
+	ctx.WriteFile("cmm.lock", `[[mods]]
+name = "Sodium"
+slug = "sodium"
+version = "2.0.0"
+`)
+
+	res := ctx.Run("update", "sodium")
+	res.AssertSuccess()
+	res.AssertStdoutContains("All mods are up to date.")
+}
+
