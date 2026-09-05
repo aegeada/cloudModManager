@@ -2,12 +2,14 @@ package sync
 
 // SyncResult captures the outcome of a synchronization operation.
 type SyncResult struct {
-	AddedMods   []string
-	UpdatedMods []string
-	RemovedMods []string
-	UnknownJars []string
-	UpToDate    bool
-	Message     string
+	AddedMods       []string
+	UpdatedMods     []string
+	RemovedMods     []string
+	UnknownJars     []string
+	UnreadableFiles []string
+	EmptyJars       []string
+	UpToDate        bool
+	Message         string
 }
 
 // LocalSyncOptions contains options for local folder synchronization.

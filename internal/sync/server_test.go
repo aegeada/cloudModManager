@@ -210,6 +210,31 @@ func TestServer_HandlePush_Auth(t *testing.T) {
 		body, _ := io.ReadAll(resp3.Body)
 		t.Fatalf("expected 200 OK, got %d: %s", resp3.StatusCode, string(body))
 	}
+
+	// 4. Unauthorized - server daemon has no configured token
+	srvNoToken := NewServer(0, "", lockPath)
+	muxNoToken := http.NewServeMux()
+	muxNoToken.HandleFunc("/push", srvNoToken.HandlePush)
+	tsNoToken := httptest.NewServer(muxNoToken)
+	defer tsNoToken.Close()
+
+	var buf4 bytes.Buffer
+	w4 := multipart.NewWriter(&buf4)
+	p4, _ := w4.CreateFormFile("lockfile", "cmm.lock")
+	p4.Write([]byte(lockContent))
+	w4.Close()
+
+	req4, _ := http.NewRequest("POST", tsNoToken.URL+"/push", &buf4)
+	req4.Header.Set("Content-Type", w4.FormDataContentType())
+	req4.Header.Set("Authorization", "Bearer any-token")
+	resp4, err := http.DefaultClient.Do(req4)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp4.Body.Close()
+	if resp4.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized when server token is empty, got %d", resp4.StatusCode)
+	}
 }
 
 func TestServer_HandlePush_LockfileIngestion(t *testing.T) {
@@ -218,7 +243,7 @@ func TestServer_HandlePush_LockfileIngestion(t *testing.T) {
 	modsDir := filepath.Join(tmpDir, "mods")
 	configDir := filepath.Join(tmpDir, "config")
 
-	srv := NewServer(0, "", lockPath)
+	srv := NewServer(0, "push-token", lockPath)
 	srv.ModsDir = modsDir
 	srv.ConfigDir = configDir
 
@@ -237,6 +262,7 @@ func TestServer_HandlePush_LockfileIngestion(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", ts.URL+"/push", &buf)
 	req.Header.Set("Content-Type", w.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer push-token")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
@@ -287,7 +313,7 @@ func TestServer_HandlePush_ZipSlipRejection(t *testing.T) {
 			configDir := filepath.Join(tmpDir, "config")
 			evilTarget := filepath.Join(tmpDir, "evil.txt")
 
-			srv := NewServer(0, "", lockPath)
+			srv := NewServer(0, "push-token", lockPath)
 			srv.ModsDir = modsDir
 			srv.ConfigDir = configDir
 
@@ -317,6 +343,7 @@ func TestServer_HandlePush_ZipSlipRejection(t *testing.T) {
 
 			req, _ := http.NewRequest("POST", ts.URL+"/push", &buf)
 			req.Header.Set("Content-Type", w.FormDataContentType())
+			req.Header.Set("Authorization", "Bearer push-token")
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
 				t.Fatalf("request failed: %v", err)
@@ -341,7 +368,7 @@ func TestServer_HandlePush_ConfigExtraction(t *testing.T) {
 	modsDir := filepath.Join(tmpDir, "mods")
 	configDir := filepath.Join(tmpDir, "config")
 
-	srv := NewServer(0, "", lockPath)
+	srv := NewServer(0, "push-token", lockPath)
 	srv.ModsDir = modsDir
 	srv.ConfigDir = configDir
 
@@ -369,6 +396,7 @@ func TestServer_HandlePush_ConfigExtraction(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", ts.URL+"/push", &buf)
 	req.Header.Set("Content-Type", w.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer push-token")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
@@ -405,7 +433,7 @@ func TestServer_HandlePush_SideFiltering(t *testing.T) {
 	modsDir := filepath.Join(tmpDir, "mods")
 	configDir := filepath.Join(tmpDir, "config")
 
-	srv := NewServer(0, "", lockPath)
+	srv := NewServer(0, "push-token", lockPath)
 	srv.ModsDir = modsDir
 	srv.ConfigDir = configDir
 
@@ -445,6 +473,7 @@ side = "server"
 
 	req, _ := http.NewRequest("POST", ts.URL+"/push", &buf)
 	req.Header.Set("Content-Type", w.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer push-token")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
@@ -483,7 +512,7 @@ func TestServer_HandlePush_DryRun(t *testing.T) {
 	modsDir := filepath.Join(tmpDir, "mods")
 	configDir := filepath.Join(tmpDir, "config")
 
-	srv := NewServer(0, "", lockPath)
+	srv := NewServer(0, "push-token", lockPath)
 	srv.ModsDir = modsDir
 	srv.ConfigDir = configDir
 
@@ -510,6 +539,7 @@ side = "both"
 
 	req, _ := http.NewRequest("POST", ts.URL+"/push", &buf)
 	req.Header.Set("Content-Type", w.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer push-token")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
@@ -540,7 +570,7 @@ side = "both"
 
 func TestServer_HandlePush_InvalidLockfile(t *testing.T) {
 	tmpDir := t.TempDir()
-	srv := NewServer(0, "", filepath.Join(tmpDir, "cmm.lock"))
+	srv := NewServer(0, "push-token", filepath.Join(tmpDir, "cmm.lock"))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/push", srv.HandlePush)
@@ -555,6 +585,7 @@ func TestServer_HandlePush_InvalidLockfile(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", ts.URL+"/push", &buf)
 	req.Header.Set("Content-Type", w.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer push-token")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
@@ -563,5 +594,96 @@ func TestServer_HandlePush_InvalidLockfile(t *testing.T) {
 
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400 Bad Request for corrupted lockfile, got %d", resp.StatusCode)
+	}
+}
+
+func TestServer_HandlePush_DecompressionBombLimit(t *testing.T) {
+	tmpDir := t.TempDir()
+	lockPath := filepath.Join(tmpDir, "cmm.lock")
+	modsDir := filepath.Join(tmpDir, "mods")
+	configDir := filepath.Join(tmpDir, "config")
+
+	srv := NewServer(0, "push-token", lockPath)
+	srv.ModsDir = modsDir
+	srv.ConfigDir = configDir
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/push", srv.HandlePush)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	// Create a zip with an uncompressed payload > 50MB (e.g. 51MB of zeros compresses to a few KB)
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	f, err := zw.CreateHeader(&zip.FileHeader{
+		Name:   "bomb.txt",
+		Method: zip.Deflate,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write 51MB of zeroes
+	chunk := make([]byte, 1024*1024)
+	for i := 0; i < 51; i++ {
+		if _, err := f.Write(chunk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	lp, _ := w.CreateFormFile("lockfile", "cmm.lock")
+	lp.Write([]byte("[mods]\n"))
+	cp, _ := w.CreateFormFile("config", "config.zip")
+	cp.Write(zipBuf.Bytes())
+	w.Close()
+
+	req, _ := http.NewRequest("POST", ts.URL+"/push", &buf)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer push-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 400 Bad Request for file exceeding 50MB, got %d: %s", resp.StatusCode, string(body))
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "exceeds 50MB limit") {
+		t.Errorf("expected error message to mention 'exceeds 50MB limit', got: %s", string(body))
+	}
+
+	// Verify no bomb.txt left in configDir
+	if _, err := os.Stat(filepath.Join(configDir, "bomb.txt")); !os.IsNotExist(err) {
+		t.Errorf("SECURITY: bomb.txt was left on disk after 50MB limit violation!")
+	}
+}
+
+func TestServer_HTTPTimeouts(t *testing.T) {
+	srv := NewServer(9999, "my-token", "")
+	hs := srv.HTTPServer()
+	if hs == nil {
+		t.Fatalf("expected srv.HTTPServer() to be non-nil")
+	}
+
+	if hs.ReadHeaderTimeout != 5*time.Second {
+		t.Errorf("expected ReadHeaderTimeout=5s, got %v", hs.ReadHeaderTimeout)
+	}
+	if hs.ReadTimeout != 30*time.Second {
+		t.Errorf("expected ReadTimeout=30s, got %v", hs.ReadTimeout)
+	}
+	if hs.WriteTimeout != 60*time.Second {
+		t.Errorf("expected WriteTimeout=60s, got %v", hs.WriteTimeout)
+	}
+	if hs.IdleTimeout != 120*time.Second {
+		t.Errorf("expected IdleTimeout=120s, got %v", hs.IdleTimeout)
 	}
 }

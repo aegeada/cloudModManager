@@ -320,6 +320,32 @@ cmm scan
 cmm scan /home/ubuntu/minecraft-server
 ```
 
+---
+
+### 12. Cloud Mod Manager Sürüm Denetimi ve Kendi Kendini Güncelleme: `cmm version`
+Cloud Mod Manager'ın mevcut sürümünü gösterir, GitHub üzerindeki en son yayınlanan sürümü (`aegeada/cloudModManager`) sorgular ve yeni bir sürüm çıktığında tek onay ile binary'i otomatik olarak yerinde günceller:
+
+```bash
+# Sürümü ve güncelleme durumunu denetleme:
+cmm version
+# Çıktı:
+# Cloud Mod Manager v0.1.0 (linux/amd64)
+# 🔍 Checking for updates...
+# ✅ Cloud Mod Manager is up to date (v0.1.0).
+
+# Yeni bir sürüm varsa:
+# 🚀 A new version of Cloud Mod Manager is available: v0.2.0 (Current: v0.1.0)
+# Download and install v0.2.0 now? [y/N]: y
+# ⬇️  Downloading and installing v0.2.0...
+# ✨ Successfully updated Cloud Mod Manager to v0.2.0!
+
+# Yalnızca güncelleme olup olmadığını kontrol etme (onay sormadan):
+cmm version --check
+
+# Sormadan otomatik güncelleme:
+cmm version --yes
+```
+
 > **İpucu**: `cmm init` komutunu içinde önceden `.jar` modları olan bir klasörde çalıştırdığınızda, `cmm` mevcut modları otomatik olarak algılar ve `cmm.lock` dosyanızı hemen oluşturur.
 
 ---

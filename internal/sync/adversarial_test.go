@@ -840,3 +840,195 @@ func TestServer_Adversarial_ConcurrentRequestsAndAuth(t *testing.T) {
 		t.Errorf("encountered %d errors during concurrent server stress test", errCount)
 	}
 }
+
+func TestSyncLocal_Adversarial_ToggleDiskExtensionStress(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "cmm.toml")
+	lockPath := filepath.Join(tmpDir, "cmm.lock")
+	modsDir := filepath.Join(tmpDir, "mods")
+	if err := os.MkdirAll(modsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	modData := []byte("mod-toggle-stress-data")
+	modHash := hash512Str(modData)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v2/version_files", func(w http.ResponseWriter, r *http.Request) {
+		res := map[string]modrinth.Version{
+			modHash: {
+				ID:            "V-TOGGLE",
+				ProjectID:     "P-TOGGLE",
+				Name:          "Toggle Mod",
+				VersionNumber: "1.0.0",
+				Files: []modrinth.VersionFile{
+					{
+						Filename: "toggle.jar",
+						Primary:  true,
+						Hashes:   map[string]string{"sha512": modHash},
+					},
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(res)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	client, err := modrinth.NewClientWithToken(srv.URL+"/v2", "CMM-Test/1.0", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	syncer := NewLocalSynchronizer(client, cfgPath, lockPath)
+
+	for cycle := 0; cycle < 10; cycle++ {
+		// 1. Set as active (.jar)
+		activePath := filepath.Join(modsDir, "toggle.jar")
+		disabledPath := filepath.Join(modsDir, "toggle.jar.disabled")
+		_ = os.Remove(disabledPath)
+		if err := os.WriteFile(activePath, modData, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := syncer.Sync(LocalSyncOptions{Path: modsDir})
+		if err != nil {
+			t.Fatalf("cycle %d active sync failed: %v", cycle, err)
+		}
+
+		lock1, err := config.LoadLockfile(lockPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m1 := lock1.GetMod("P-TOGGLE")
+		if m1 == nil || m1.Disabled {
+			t.Fatalf("cycle %d: expected Disabled=false for toggle.jar, got %+v", cycle, m1)
+		}
+
+		// 2. Set as disabled (.jar.disabled)
+		_ = os.Remove(activePath)
+		if err := os.WriteFile(disabledPath, modData, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err = syncer.Sync(LocalSyncOptions{Path: modsDir})
+		if err != nil {
+			t.Fatalf("cycle %d disabled sync failed: %v", cycle, err)
+		}
+
+		lock2, err := config.LoadLockfile(lockPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m2 := lock2.GetMod("P-TOGGLE")
+		if m2 == nil || !m2.Disabled {
+			t.Fatalf("cycle %d: expected Disabled=true for toggle.jar.disabled, got %+v", cycle, m2)
+		}
+	}
+}
+
+func TestDeltaEngine_Adversarial_CorruptDownloadAndZeroOrphanFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	modsDir := filepath.Join(tmpDir, "mods")
+	lockPath := filepath.Join(tmpDir, "cmm.lock")
+	_ = os.MkdirAll(modsDir, 0755)
+
+	initialModData := []byte("mod-to-retain")
+	_ = os.WriteFile(filepath.Join(modsDir, "retain.jar"), initialModData, 0644)
+
+	initialLock := &config.Lockfile{
+		Mods: []config.LockfileMod{
+			{Slug: "retain", Name: "Retain", Version: "1.0.0", FileName: "retain.jar", SHA512: hash512Str(initialModData)},
+		},
+	}
+	config.SaveLockfile(lockPath, initialLock)
+
+	// Mock server that truncates response or drops connection
+	mux := http.NewServeMux()
+	mux.HandleFunc("/files/mod1.jar", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("valid-mod-1"))
+	})
+	mux.HandleFunc("/files/mod2.jar", func(w http.ResponseWriter, r *http.Request) {
+		// Send incorrect checksum or short payload
+		w.Write([]byte("corrupt-bytes"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	client, _ := modrinth.NewClientWithToken(srv.URL+"/v2", "CMM-Test/1.0", "")
+	engine := NewDeltaEngine(client, nil, initialLock, modsDir, lockPath)
+
+	targets := []TargetFile{
+		{
+			FileName:    "mod1.jar",
+			SHA512:      hash512Str([]byte("valid-mod-1")),
+			DownloadURL: srv.URL + "/files/mod1.jar",
+		},
+		{
+			FileName:    "mod2.jar",
+			SHA512:      hash512Str([]byte("expected-different-full-content")),
+			DownloadURL: srv.URL + "/files/mod2.jar",
+		},
+	}
+
+	_, err := engine.ApplyTargetFiles(targets)
+	if err == nil {
+		t.Fatalf("expected error on corrupt/mismatched download, got nil")
+	}
+
+	// Verify zero .tmp files exist in modsDir
+	entries, _ := os.ReadDir(modsDir)
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") || strings.Contains(e.Name(), ".tmp.") {
+			t.Errorf("found leaked temporary file: %s", e.Name())
+		}
+	}
+
+	// Verify retain.jar still exists intact
+	content, err := os.ReadFile(filepath.Join(modsDir, "retain.jar"))
+	if err != nil || string(content) != string(initialModData) {
+		t.Fatalf("retain.jar was damaged or removed: %v", err)
+	}
+}
+
+func TestServer_Adversarial_PushAuthVariations(t *testing.T) {
+	tmpDir := t.TempDir()
+	lockPath := filepath.Join(tmpDir, "cmm.lock")
+	_ = os.WriteFile(lockPath, []byte("[mods]\n"), 0644)
+
+	validToken := "top-secret-daemon-token"
+	srv := NewServer(0, validToken, lockPath)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/push", srv.HandlePush)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	unauthorizedHeaders := []string{
+		"",
+		"Bearer ",
+		"Bearer      ",
+		"Bearer wrong",
+		"Bearer top-secret-daemon-token-extra",
+		"Bearer top-secret-daemon-toke",
+		"Basic dXNlcjpwYXNz",
+		"Bearer " + strings.ToUpper(validToken),
+	}
+
+	for _, hdr := range unauthorizedHeaders {
+		req, _ := http.NewRequest("POST", ts.URL+"/push", strings.NewReader("dummy"))
+		if hdr != "" {
+			req.Header.Set("Authorization", hdr)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("expected 401 Unauthorized for header %q, got %d", hdr, resp.StatusCode)
+		}
+		if !strings.Contains(resp.Header.Get("WWW-Authenticate"), `Bearer realm="cmm"`) {
+			t.Errorf("expected WWW-Authenticate header for %q, got: %s", hdr, resp.Header.Get("WWW-Authenticate"))
+		}
+	}
+}

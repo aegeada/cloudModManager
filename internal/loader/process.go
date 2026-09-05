@@ -20,22 +20,33 @@ func isRunningDefault() bool {
 		out, err := exec.Command("tasklist").Output()
 		if err == nil {
 			lower := strings.ToLower(string(out))
-			if strings.Contains(lower, "javaw.exe") || strings.Contains(lower, "java.exe") || strings.Contains(lower, "minecraft") {
+			if strings.Contains(lower, "minecraft") {
 				return true
 			}
 		}
 		return false
 	}
 
-	// Linux / macOS
-	out, err := exec.Command("pgrep", "-f", "java").Output()
-	if err == nil && len(strings.TrimSpace(string(out))) > 0 {
-		return true
+	// Linux / macOS: check for Minecraft / server specific indicators
+	// to avoid false positives on IDEs, Gradle, and general Java processes
+	indicators := []string{
+		"minecraft",
+		"server.jar",
+		"fabric-loader",
+		"quilt-loader",
+		"net.minecraft",
+		"forge.jar",
+		"neoforge",
+		"paper.jar",
+		"spigot.jar",
+		"purpur.jar",
 	}
 
-	out2, err2 := exec.Command("pgrep", "-f", "minecraft").Output()
-	if err2 == nil && len(strings.TrimSpace(string(out2))) > 0 {
-		return true
+	for _, ind := range indicators {
+		out, err := exec.Command("pgrep", "-f", ind).Output()
+		if err == nil && len(strings.TrimSpace(string(out))) > 0 {
+			return true
+		}
 	}
 
 	return false

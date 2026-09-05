@@ -112,26 +112,36 @@ func (s *ModrinthSynchronizer) Sync(opts ModrinthSyncOptions) (*SyncResult, erro
 	}
 
 	// 3. Side Filtering
-	side := cfg.Profile.Side
-	if side == "" {
-		side = "server"
+	profileSide := cfg.Profile.Side
+	if profileSide == "" {
+		profileSide = "server"
 	}
 
 	var targets []TargetFile
 	for _, f := range index.Files {
 		// Environment side filtering
 		if f.Env != nil {
-			if strings.EqualFold(side, "server") && strings.EqualFold(f.Env.Server, "unsupported") {
+			if strings.EqualFold(profileSide, "server") && strings.EqualFold(f.Env.Server, "unsupported") {
 				// Client-only mod, skip on server
 				continue
 			}
-			if strings.EqualFold(side, "client") && strings.EqualFold(f.Env.Client, "unsupported") {
+			if strings.EqualFold(profileSide, "client") && strings.EqualFold(f.Env.Client, "unsupported") {
 				// Server-only mod, skip on client
 				continue
 			}
 		}
 
+		cleanPath := filepath.Clean(f.Path)
+		cleanSlash := filepath.ToSlash(cleanPath)
+		if !strings.HasPrefix(cleanSlash, "mods/") && !strings.HasSuffix(strings.ToLower(cleanPath), ".jar") && !strings.HasSuffix(strings.ToLower(cleanPath), ".jar.disabled") {
+			continue
+		}
+
 		filename := filepath.Base(f.Path)
+		if filename == "" || filename == "." || filename == "/" {
+			continue
+		}
+
 		sha512 := f.Hashes["sha512"]
 		var downloadURL string
 		if len(f.Downloads) > 0 {
@@ -152,6 +162,20 @@ func (s *ModrinthSynchronizer) Sync(opts ModrinthSyncOptions) (*SyncResult, erro
 			}
 		}
 
+		// Determine mod side (preserve original side rather than overwriting with profile side)
+		modSide := "both"
+		if f.Env != nil {
+			isClient := !strings.EqualFold(f.Env.Client, "unsupported")
+			isServer := !strings.EqualFold(f.Env.Server, "unsupported")
+			if isClient && !isServer {
+				modSide = "client"
+			} else if isServer && !isClient {
+				modSide = "server"
+			} else {
+				modSide = "both"
+			}
+		}
+
 		targets = append(targets, TargetFile{
 			FileName:    filename,
 			SHA512:      sha512,
@@ -159,7 +183,7 @@ func (s *ModrinthSynchronizer) Sync(opts ModrinthSyncOptions) (*SyncResult, erro
 			Slug:        slug,
 			Name:        name,
 			ProjectID:   projectID,
-			Side:        side,
+			Side:        modSide,
 		})
 	}
 

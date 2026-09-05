@@ -29,6 +29,7 @@ func detectExactMCVersion(baseDir string) (string, bool) {
 		if !e.IsDir() && strings.HasSuffix(strings.ToLower(e.Name()), ".jar") {
 			jarPath := filepath.Join(baseDir, e.Name())
 			if zr, err := zip.OpenReader(jarPath); err == nil {
+				var foundMC string
 				for _, f := range zr.File {
 					if f.Name == "version.json" {
 						if rc, err := f.Open(); err == nil {
@@ -37,20 +38,23 @@ func detectExactMCVersion(baseDir string) (string, bool) {
 								Name string `json:"name"`
 							}
 							if err := json.NewDecoder(rc).Decode(&vj); err == nil {
-								rc.Close()
-								zr.Close()
 								if vj.ID != "" {
-									return vj.ID, true
-								}
-								if vj.Name != "" {
-									return vj.Name, true
+									foundMC = vj.ID
+								} else if vj.Name != "" {
+									foundMC = vj.Name
 								}
 							}
 							rc.Close()
+							if foundMC != "" {
+								break
+							}
 						}
 					}
 				}
 				zr.Close()
+				if foundMC != "" {
+					return foundMC, true
+				}
 			}
 		}
 	}
@@ -254,8 +258,10 @@ cmm.toml and cmm.lock automatically.`,
 		modsDir := filepath.Join(absDir, "mods")
 		reader := bufio.NewReader(os.Stdin)
 
+		isNonTerminal := !isTerminal(os.Stdin)
+
 		askConfirmPrompt := func(prompt string) bool {
-			if scanYes {
+			if scanYes || isNonTerminal {
 				return true
 			}
 			fmt.Print(prompt)
@@ -276,6 +282,7 @@ cmm.toml and cmm.lock automatically.`,
 			detLoader, detMC := detectEnvironment(absDir)
 			finalMC := detMC
 			finalLoader := detLoader
+			fmt.Printf("Auto-detected Environment -> Loader: %s, Minecraft: %s\n", detLoader, detMC)
 
 			// Step 1: Detect exact Minecraft version
 			exactMC, isExactMC := detectExactMCVersion(absDir)
@@ -286,8 +293,11 @@ cmm.toml and cmm.lock automatically.`,
 				prompt := fmt.Sprintf("Could not determine exact Minecraft version. Use detected version (%s)? [Y/n]: ", detMC)
 				if !askConfirmPrompt(prompt) {
 					fmt.Print("Enter Minecraft version: ")
-					manualMC, _ := reader.ReadString('\n')
+					manualMC, err := reader.ReadString('\n')
 					manualMC = strings.TrimSpace(manualMC)
+					if err != nil && manualMC == "" {
+						manualMC = detMC
+					}
 					if manualMC != "" {
 						finalMC = manualMC
 					}
@@ -303,8 +313,11 @@ cmm.toml and cmm.lock automatically.`,
 				prompt := fmt.Sprintf("Could not determine exact Loader version. Use detected version (%s)? [Y/n]: ", detLoader)
 				if !askConfirmPrompt(prompt) {
 					fmt.Print("Enter Loader (e.g. fabric, forge, neoforge, quilt): ")
-					manualLdr, _ := reader.ReadString('\n')
+					manualLdr, err := reader.ReadString('\n')
 					manualLdr = strings.TrimSpace(strings.ToLower(manualLdr))
+					if err != nil && manualLdr == "" {
+						manualLdr = detLoader
+					}
 					if manualLdr != "" {
 						finalLoader = manualLdr
 					}

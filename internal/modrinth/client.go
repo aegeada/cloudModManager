@@ -282,8 +282,10 @@ func (c *Client) GetGameVersionTags() ([]GameVersionTag, error) {
 }
 
 // DownloadFile downloads a file from URL to destPath, verifying sha512 if provided.
+// Downloads to a temporary staging file (.tmp) and verifies SHA-512 before renaming to destPath.
 func (c *Client) DownloadFile(urlStr, destPath string, expectedSha512 string) error {
-	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+	destDir := filepath.Dir(destPath)
+	if err := os.MkdirAll(destDir, 0755); err != nil {
 		return err
 	}
 
@@ -303,27 +305,46 @@ func (c *Client) DownloadFile(urlStr, destPath string, expectedSha512 string) er
 		return fmt.Errorf("failed to download file (HTTP %d)", resp.StatusCode)
 	}
 
-	out, err := os.Create(destPath)
+	tmpFile, err := os.CreateTemp(destDir, "."+filepath.Base(destPath)+"-*.tmp")
 	if err != nil {
-		return err
+		tmpPath := destPath + ".tmp"
+		tmpFile, err = os.Create(tmpPath)
+		if err != nil {
+			return err
+		}
 	}
-	defer out.Close()
+	tmpPath := tmpFile.Name()
+	defer func() {
+		if tmpPath != "" {
+			_ = os.Remove(tmpPath)
+		}
+	}()
 
 	sha512Hasher := sha512.New()
 	sha1Hasher := sha1.New()
-	multiWriter := io.MultiWriter(out, sha512Hasher, sha1Hasher)
+	multiWriter := io.MultiWriter(tmpFile, sha512Hasher, sha1Hasher)
 
 	if _, err := io.Copy(multiWriter, resp.Body); err != nil {
+		tmpFile.Close()
 		return err
 	}
 
 	if expectedSha512 != "" {
 		calculatedHash := hex.EncodeToString(sha512Hasher.Sum(nil))
-		if calculatedHash != expectedSha512 {
-			os.Remove(destPath)
+		if !strings.EqualFold(calculatedHash, expectedSha512) {
+			tmpFile.Close()
 			return fmt.Errorf("SHA-512 checksum mismatch: expected %s, got %s", expectedSha512, calculatedHash)
 		}
 	}
+
+	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		return err
+	}
+	tmpPath = ""
 
 	return nil
 }

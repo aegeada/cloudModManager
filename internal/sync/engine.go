@@ -43,6 +43,8 @@ func NewDeltaEngine(client *modrinth.Client, cfg *config.Config, localLock *conf
 }
 
 // ApplyTargetFiles executes delta synchronization against a normalized list of target files.
+// Phase 1: Download all target files into temporary staging files (.tmp) and verify checksums.
+// Phase 2: If and only if all downloads succeed, apply updates, delete extraneous unpinned files, and persist lockfile.
 func (e *DeltaEngine) ApplyTargetFiles(targets []TargetFile) (*SyncResult, error) {
 	if err := os.MkdirAll(e.ModsDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create mods directory '%s': %w", e.ModsDir, err)
@@ -55,28 +57,72 @@ func (e *DeltaEngine) ApplyTargetFiles(targets []TargetFile) (*SyncResult, error
 		targetMap[strings.ToLower(t.FileName)] = t
 	}
 
-	// 1. Prune extraneous files from disk and local lockfile
-	entries, err := os.ReadDir(e.ModsDir)
-	if err == nil {
-		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".jar") {
-				continue
-			}
-			filename := entry.Name()
-			if _, exists := targetMap[filename]; !exists {
-				if _, existsLower := targetMap[strings.ToLower(filename)]; !existsLower {
-					filePath := filepath.Join(e.ModsDir, filename)
-					_ = os.Remove(filePath)
-					result.RemovedMods = append(result.RemovedMods, filename)
+	// Identify pinned mods and files from local lockfile
+	pinnedFiles := make(map[string]bool)
+	pinnedMods := make(map[string]config.LockfileMod)
+	if e.LocalLock != nil {
+		for _, m := range e.LocalLock.Mods {
+			if m.Pinned {
+				if m.FileName != "" {
+					pinnedFiles[m.FileName] = true
+					pinnedFiles[strings.ToLower(m.FileName)] = true
+				}
+				if m.Slug != "" {
+					pinnedMods[strings.ToLower(m.Slug)] = m
+				}
+				if m.ProjectID != "" {
+					pinnedMods[strings.ToLower(m.ProjectID)] = m
 				}
 			}
 		}
 	}
 
-	// 2. Download missing or updated files
-	newLock := &config.Lockfile{Mods: []config.LockfileMod{}}
+	type stagedFile struct {
+		tmpPath  string
+		destPath string
+		fileName string
+	}
+	var staged []stagedFile
 
+	defer func() {
+		// Clean up any remaining staging files on error/abort
+		for _, s := range staged {
+			if s.tmpPath != "" {
+				_ = os.Remove(s.tmpPath)
+			}
+		}
+	}()
+
+	// PHASE 1: Resolve and stage all required downloads
 	for _, target := range targets {
+		// Check if mod is pinned in local lockfile
+		var existing *config.LockfileMod
+		if target.ProjectID != "" {
+			existing = e.LocalLock.GetMod(target.ProjectID)
+		}
+		if existing == nil && target.Slug != "" {
+			existing = e.LocalLock.GetMod(target.Slug)
+		}
+		if existing == nil && target.FileName != "" {
+			existing = e.LocalLock.GetMod(target.FileName)
+		}
+		if existing == nil && target.Name != "" {
+			existing = e.LocalLock.GetMod(target.Name)
+		}
+
+		// Pinned mod preservation: Do not overwrite pinned mods with newer versions
+		if existing != nil && existing.Pinned {
+			existingFile := existing.FileName
+			if existingFile == "" {
+				existingFile = target.FileName
+			}
+			existingPath := filepath.Join(e.ModsDir, existingFile)
+			if _, err := os.Stat(existingPath); err == nil {
+				// Mod is pinned and present on disk: preserve it without downloading new version
+				continue
+			}
+		}
+
 		destPath := filepath.Join(e.ModsDir, target.FileName)
 		needsDownload := true
 
@@ -172,22 +218,81 @@ func (e *DeltaEngine) ApplyTargetFiles(targets []TargetFile) (*SyncResult, error
 				}
 			}
 
+			tmpFile, err := os.CreateTemp(e.ModsDir, fmt.Sprintf(".%s-*.tmp", target.FileName))
+			if err != nil {
+				return nil, fmt.Errorf("failed to create staging file for '%s': %w", target.FileName, err)
+			}
+			tmpPath := tmpFile.Name()
+			_ = tmpFile.Close()
+
 			if downloadURL != "" && e.Client != nil {
-				if err := e.Client.DownloadFile(downloadURL, destPath, target.SHA512); err != nil {
+				if err := e.Client.DownloadFile(downloadURL, tmpPath, target.SHA512); err != nil {
+					_ = os.Remove(tmpPath)
 					return nil, fmt.Errorf("failed to download '%s': %w", target.FileName, err)
 				}
-				result.AddedMods = append(result.AddedMods, target.FileName)
+				staged = append(staged, stagedFile{tmpPath: tmpPath, destPath: destPath, fileName: target.FileName})
 			} else if e.Client == nil {
 				if _, err := os.Stat(destPath); os.IsNotExist(err) {
-					_ = os.WriteFile(destPath, []byte("jar data"), 0644)
+					if err := os.WriteFile(tmpPath, []byte("jar data"), 0644); err != nil {
+						_ = os.Remove(tmpPath)
+						return nil, err
+					}
+					staged = append(staged, stagedFile{tmpPath: tmpPath, destPath: destPath, fileName: target.FileName})
+				} else {
+					_ = os.Remove(tmpPath)
 				}
-				result.AddedMods = append(result.AddedMods, target.FileName)
 			} else {
+				_ = os.Remove(tmpPath)
 				return nil, fmt.Errorf("cannot download '%s': no download URL available", target.FileName)
 			}
 		}
+	}
 
-		// Look up existing mod to preserve Pinned status and canonical identity
+	// PHASE 2: Apply staged files, prune extraneous files, and persist lockfile
+	for i, s := range staged {
+		if err := os.Rename(s.tmpPath, s.destPath); err != nil {
+			return nil, fmt.Errorf("failed to commit staged file '%s': %w", s.fileName, err)
+		}
+		staged[i].tmpPath = ""
+		result.AddedMods = append(result.AddedMods, s.fileName)
+	}
+
+	// Prune extraneous files (strictly preserving pinned mods)
+	entries, err := os.ReadDir(e.ModsDir)
+	if err == nil {
+		for _, entry := range entries {
+			lowerName := strings.ToLower(entry.Name())
+			if entry.IsDir() || (!strings.HasSuffix(lowerName, ".jar") && !strings.HasSuffix(lowerName, ".jar.disabled")) {
+				continue
+			}
+			filename := entry.Name()
+
+			// Skip if present in targets
+			if _, exists := targetMap[filename]; exists {
+				continue
+			}
+			if _, existsLower := targetMap[strings.ToLower(filename)]; existsLower {
+				continue
+			}
+
+			// Pinned mod preservation: Do not prune pinned mods
+			if pinnedFiles[filename] || pinnedFiles[strings.ToLower(filename)] {
+				continue
+			}
+			slug := config.ExtractModSlug(filename)
+			if m, ok := pinnedMods[strings.ToLower(slug)]; ok && m.Pinned {
+				continue
+			}
+
+			filePath := filepath.Join(e.ModsDir, filename)
+			_ = os.Remove(filePath)
+			result.RemovedMods = append(result.RemovedMods, filename)
+		}
+	}
+
+	// Construct updated lockfile
+	newLock := &config.Lockfile{Mods: []config.LockfileMod{}}
+	for _, target := range targets {
 		var existing *config.LockfileMod
 		if target.ProjectID != "" {
 			existing = e.LocalLock.GetMod(target.ProjectID)
@@ -200,6 +305,12 @@ func (e *DeltaEngine) ApplyTargetFiles(targets []TargetFile) (*SyncResult, error
 		}
 		if existing == nil && target.Name != "" {
 			existing = e.LocalLock.GetMod(target.Name)
+		}
+
+		if existing != nil && existing.Pinned {
+			// Retain pinned mod without modifying its version
+			newLock.AddOrUpdateMod(*existing)
+			continue
 		}
 
 		pinned := false
@@ -245,6 +356,17 @@ func (e *DeltaEngine) ApplyTargetFiles(targets []TargetFile) (*SyncResult, error
 			Side:          side,
 			Pinned:        pinned,
 		})
+	}
+
+	// Retain any pinned mods from localLock that were not in targets
+	if e.LocalLock != nil {
+		for _, m := range e.LocalLock.Mods {
+			if m.Pinned {
+				if newLock.GetMod(m.Slug) == nil && newLock.GetMod(m.Name) == nil && newLock.GetMod(m.FileName) == nil {
+					newLock.AddOrUpdateMod(m)
+				}
+			}
+		}
 	}
 
 	if err := config.SaveLockfile(e.LockPath, newLock); err != nil {

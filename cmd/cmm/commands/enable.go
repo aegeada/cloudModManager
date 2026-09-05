@@ -17,8 +17,8 @@ var enableCmd = &cobra.Command{
 	Use:     "enable <mod-slug-or-name>",
 	Aliases: []string{"activate"},
 	Short:   "Enable a disabled mod by restoring its .jar filename",
-	Long: `Enable restores a disabled mod by renaming its file from .jar.disabled back to .jar in the mods directory and updating cmm.lock.`,
-	Args: cobra.MinimumNArgs(1),
+	Long:    `Enable restores a disabled mod by renaming its file from .jar.disabled back to .jar in the mods directory and updating cmm.lock.`,
+	Args:    cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		userAgent := "CloudModManager/1.0 (contact: user@domain.local)"
 		client, _ := modrinth.NewClient(userAgent)
@@ -36,10 +36,10 @@ var enableCmd = &cobra.Command{
 				os.Exit(1)
 			}
 
-			if res.Warning != "" {
-				fmt.Printf("ℹ️  %s\n", res.Warning)
+			if res.AlreadyEnabled {
+				fmt.Printf("ℹ️  Mod '%s' is already enabled\n", res.Name)
 			} else {
-				fmt.Printf("✅ Successfully enabled %s (%s -> %s)\n", res.ModName, res.OldFileName, res.NewFileName)
+				fmt.Printf("✅ Successfully enabled %s (%s -> %s)\n", res.Name, res.OldFileName, res.NewFileName)
 			}
 		}
 	},

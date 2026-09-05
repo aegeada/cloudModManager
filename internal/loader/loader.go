@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"cmm/internal/config"
+	"cmm/internal/mod"
 )
 
 var SupportedLoaders = []string{"fabric", "forge", "neoforge", "quilt"}
@@ -116,7 +117,7 @@ func CheckLatestLoaderVersion(loaderName string, currentVersion string) (latestV
 		if latestVer == "" && len(versions) > 0 {
 			latestVer = strings.TrimPrefix(versions[0].Version, "v")
 		}
-		if latestVer != "" && (currentVersion == "" || currentVersion != latestVer) {
+		if latestVer != "" && (currentVersion == "" || mod.IsNewerVersion(latestVer, currentVersion)) {
 			return latestVer, true, nil
 		}
 		return latestVer, false, nil
@@ -124,4 +125,3 @@ func CheckLatestLoaderVersion(loaderName string, currentVersion string) (latestV
 		return "", false, nil
 	}
 }
-

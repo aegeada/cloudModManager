@@ -3,6 +3,7 @@ package commands
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"cmm/internal/mod"
 	"cmm/internal/modrinth"
@@ -18,8 +19,8 @@ var disableCmd = &cobra.Command{
 	Use:     "disable <mod-slug-or-name>",
 	Aliases: []string{"deactivate"},
 	Short:   "Disable an active mod by renaming its file to .jar.disabled",
-	Long: `Disable renames the target mod's file from .jar to .jar.disabled in the mods directory and updates cmm.lock so Minecraft skips loading it.`,
-	Args: cobra.MinimumNArgs(1),
+	Long:    `Disable renames the target mod's file from .jar to .jar.disabled in the mods directory and updates cmm.lock so Minecraft skips loading it.`,
+	Args:    cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		userAgent := "CloudModManager/1.0 (contact: user@domain.local)"
 		client, _ := modrinth.NewClient(userAgent)
@@ -37,13 +38,19 @@ var disableCmd = &cobra.Command{
 				os.Exit(1)
 			}
 
-			if res.Warning != "" {
-				fmt.Printf("ℹ️  %s\n", res.Warning)
-			} else {
-				fmt.Printf("⏸️  Successfully disabled %s (%s -> %s)\n", res.ModName, res.OldFileName, res.NewFileName)
-				if len(res.DependentMods) > 0 {
-					fmt.Printf("⚠️  Warning: The following enabled mods depend on '%s': %v\n", res.ModName, res.DependentMods)
-				}
+			if res.HasDependentsWarning {
+				fmt.Fprintf(os.Stderr, "⚠️  Warning: Cannot disable '%s': active mod(s) depend on it: %s (use --force to bypass)\n", res.Name, strings.Join(res.ActiveDependents, ", "))
+				continue
+			}
+
+			if res.AlreadyDisabled {
+				fmt.Printf("ℹ️  Mod '%s' is already disabled\n", res.Name)
+				continue
+			}
+
+			fmt.Printf("⏸️  Successfully disabled %s (%s -> %s)\n", res.Name, res.OldFileName, res.NewFileName)
+			if len(res.ActiveDependents) > 0 {
+				fmt.Printf("⚠️  Warning: The following enabled mods depend on '%s': %s\n", res.Name, strings.Join(res.ActiveDependents, ", "))
 			}
 		}
 	},

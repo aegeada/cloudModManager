@@ -472,3 +472,176 @@ side = "client"
 		t.Errorf("expected connection error for unreachable host")
 	}
 }
+
+func TestDiffEngine_DisabledStatusComparison(t *testing.T) {
+	leftLock := &config.Lockfile{
+		Mods: []config.LockfileMod{
+			{
+				Slug:          "mod-disabled-locally",
+				Name:          "Mod Disabled Locally",
+				VersionNumber: "1.0.0",
+				Disabled:      true,
+			},
+			{
+				Slug:          "mod-enabled-locally",
+				Name:          "Mod Enabled Locally",
+				VersionNumber: "1.0.0",
+				Disabled:      false,
+			},
+			{
+				Slug:          "mod-both-disabled",
+				Name:          "Mod Both Disabled",
+				VersionNumber: "1.0.0",
+				Disabled:      true,
+			},
+		},
+	}
+
+	rightLock := &config.Lockfile{
+		Mods: []config.LockfileMod{
+			{
+				Slug:          "mod-disabled-locally",
+				Name:          "Mod Disabled Locally",
+				VersionNumber: "1.0.0",
+				Disabled:      false,
+			},
+			{
+				Slug:          "mod-enabled-locally",
+				Name:          "Mod Enabled Locally",
+				VersionNumber: "1.0.0",
+				Disabled:      true,
+			},
+			{
+				Slug:          "mod-both-disabled",
+				Name:          "Mod Both Disabled",
+				VersionNumber: "1.0.0",
+				Disabled:      true,
+			},
+		},
+	}
+
+	res := CompareLockfiles(leftLock, rightLock)
+
+	if res.Mismatches != 2 {
+		t.Errorf("expected 2 mismatches from status discrepancy, got %d", res.Mismatches)
+	}
+	if res.Synchronized != 1 {
+		t.Errorf("expected 1 synchronized (both disabled), got %d", res.Synchronized)
+	}
+
+	entryMap := make(map[string]ModDiffEntry)
+	for _, e := range res.Entries {
+		entryMap[e.Slug] = e
+	}
+
+	// 1. Disabled locally, enabled remotely
+	e1 := entryMap["mod-disabled-locally"]
+	if e1.Category != DiffMismatch || e1.Status != "[MISMATCH]" || !strings.Contains(e1.Notes, "disabled locally, enabled remotely") {
+		t.Errorf("unexpected entry for mod-disabled-locally: %+v", e1)
+	}
+	if !e1.LocalDisabled || e1.RemoteDisabled {
+		t.Errorf("expected LocalDisabled=true, RemoteDisabled=false, got %+v", e1)
+	}
+
+	// 2. Enabled locally, disabled remotely
+	e2 := entryMap["mod-enabled-locally"]
+	if e2.Category != DiffMismatch || e2.Status != "[MISMATCH]" || !strings.Contains(e2.Notes, "enabled locally, disabled remotely") {
+		t.Errorf("unexpected entry for mod-enabled-locally: %+v", e2)
+	}
+	if e2.LocalDisabled || !e2.RemoteDisabled {
+		t.Errorf("expected LocalDisabled=false, RemoteDisabled=true, got %+v", e2)
+	}
+
+	// 3. Both disabled
+	e3 := entryMap["mod-both-disabled"]
+	if e3.Category != DiffOK || e3.Status != "[OK]" || !strings.Contains(e3.Notes, "Synchronized") {
+		t.Errorf("unexpected entry for mod-both-disabled: %+v", e3)
+	}
+}
+
+func TestDiffEngine_SHA512ChecksumComparison(t *testing.T) {
+	leftLock := &config.Lockfile{
+		Mods: []config.LockfileMod{
+			{
+				Slug:          "mod-hash-mismatch",
+				Name:          "Mod Hash Mismatch",
+				VersionNumber: "1.0.0",
+				SHA512:        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			},
+			{
+				Slug:          "mod-hash-match",
+				Name:          "Mod Hash Match",
+				VersionNumber: "1.0.0",
+				SHA512:        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			},
+		},
+	}
+
+	rightLock := &config.Lockfile{
+		Mods: []config.LockfileMod{
+			{
+				Slug:          "mod-hash-mismatch",
+				Name:          "Mod Hash Mismatch",
+				VersionNumber: "1.0.0",
+				SHA512:        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			},
+			{
+				Slug:          "mod-hash-match",
+				Name:          "Mod Hash Match",
+				VersionNumber: "1.0.0",
+				SHA512:        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			},
+		},
+	}
+
+	res := CompareLockfiles(leftLock, rightLock)
+
+	if res.Mismatches != 1 {
+		t.Errorf("expected 1 mismatch from hash discrepancy, got %d", res.Mismatches)
+	}
+	if res.Synchronized != 1 {
+		t.Errorf("expected 1 synchronized from matching hash, got %d", res.Synchronized)
+	}
+
+	entryMap := make(map[string]ModDiffEntry)
+	for _, e := range res.Entries {
+		entryMap[e.Slug] = e
+	}
+
+	mismatch := entryMap["mod-hash-mismatch"]
+	if mismatch.Category != DiffMismatch || mismatch.Status != "[MISMATCH]" || !strings.Contains(mismatch.Notes, "Checksum mismatch") {
+		t.Errorf("unexpected entry for mod-hash-mismatch: %+v", mismatch)
+	}
+
+	match := entryMap["mod-hash-match"]
+	if match.Category != DiffOK || match.Status != "[OK]" || !strings.Contains(match.Notes, "Synchronized") {
+		t.Errorf("unexpected entry for mod-hash-match: %+v", match)
+	}
+}
+
+func TestDiffEngine_SideNormalizationVariants(t *testing.T) {
+	leftLock := &config.Lockfile{
+		Mods: []config.LockfileMod{
+			{Slug: "mod-client-opt", Name: "Client Opt", Side: "Client (Server Opt.)"},
+			{Slug: "mod-client-only-opt", Name: "Client Only Opt", Side: "Client Only (Opt.)"},
+		},
+	}
+	rightLock := &config.Lockfile{
+		Mods: []config.LockfileMod{
+			{Slug: "mod-server-opt", Name: "Server Opt", Side: "Server (Client Opt.)"},
+			{Slug: "mod-server-only-opt", Name: "Server Only Opt", Side: "Server Only (Opt.)"},
+		},
+	}
+
+	res := CompareLockfiles(leftLock, rightLock)
+
+	if res.ClientOnly != 2 {
+		t.Errorf("expected 2 client-only mods recognized from variants, got %d (missing: %d)", res.ClientOnly, res.Missing)
+	}
+	if res.ServerOnly != 2 {
+		t.Errorf("expected 2 server-only mods recognized from variants, got %d (missing: %d)", res.ServerOnly, res.Missing)
+	}
+	if res.Missing != 0 {
+		t.Errorf("expected 0 missing, got %d: %+v", res.Missing, res.Entries)
+	}
+}

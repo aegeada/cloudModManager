@@ -16,6 +16,7 @@ import (
 var (
 	updateForce   bool
 	updateChannel string
+	updateYes     bool
 )
 
 var updateCmd = &cobra.Command{
@@ -71,17 +72,19 @@ var updateCmd = &cobra.Command{
 				}
 			}
 
-			reader := bufio.NewReader(os.Stdin)
-			fmt.Print("Apply updates? [y/N]: ")
-			input, err := reader.ReadString('\n')
-			if err != nil && input == "" {
-				fmt.Println("Update cancelled.")
-				return
-			}
-			input = strings.TrimSpace(strings.ToLower(input))
-			if input != "y" && input != "yes" {
-				fmt.Println("Update cancelled.")
-				return
+			if !updateYes {
+				reader := bufio.NewReader(os.Stdin)
+				fmt.Print("Apply updates? [y/N]: ")
+				input, err := reader.ReadString('\n')
+				if err != nil && input == "" {
+					fmt.Println("Update cancelled.")
+					return
+				}
+				input = strings.TrimSpace(strings.ToLower(input))
+				if input != "y" && input != "yes" {
+					fmt.Println("Update cancelled.")
+					return
+				}
 			}
 
 			if err := mgr.ApplyUpdates(candidates); err != nil {
@@ -105,4 +108,5 @@ func init() {
 	rootCmd.AddCommand(updateCmd)
 	updateCmd.Flags().BoolVarP(&updateForce, "force", "f", false, "Force update pinned mods")
 	updateCmd.Flags().StringVarP(&updateChannel, "channel", "c", "release", "Stability channel filter (release, beta, alpha)")
+	updateCmd.Flags().BoolVarP(&updateYes, "yes", "y", false, "Automatically confirm update prompt")
 }

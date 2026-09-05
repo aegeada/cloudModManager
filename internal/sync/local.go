@@ -73,7 +73,7 @@ func (s *LocalSynchronizer) Sync(opts LocalSyncOptions) (*SyncResult, error) {
 	var jarFiles []string
 	for _, e := range entries {
 		lowerName := strings.ToLower(e.Name())
-		if !e.IsDir() && (strings.HasSuffix(lowerName, ".jar") || strings.HasSuffix(lowerName, ".disabled")) {
+		if !e.IsDir() && (strings.HasSuffix(lowerName, ".jar") || strings.HasSuffix(lowerName, ".jar.disabled")) {
 			jarFiles = append(jarFiles, e.Name())
 		}
 	}
@@ -81,6 +81,10 @@ func (s *LocalSynchronizer) Sync(opts LocalSyncOptions) (*SyncResult, error) {
 	if len(jarFiles) == 0 {
 		return &SyncResult{Message: "No mods found"}, nil
 	}
+
+	result := &SyncResult{}
+	unreadableJars := make(map[string]bool)
+	emptyJars := make(map[string]bool)
 
 	// 3. Compute SHA-512 and SHA-1 checksums
 	sha512ToName := make(map[string]string)
@@ -92,12 +96,28 @@ func (s *LocalSynchronizer) Sync(opts LocalSyncOptions) (*SyncResult, error) {
 
 	for _, jar := range jarFiles {
 		fullPath := filepath.Join(modsDir, jar)
-		h512, err512 := mod.ComputeSHA512(fullPath)
-		if err512 == nil && h512 != "" {
-			sha512ToName[h512] = jar
-			nameToSha512[jar] = h512
-			sha512List = append(sha512List, h512)
+		fi, err := os.Stat(fullPath)
+		if err != nil {
+			result.UnreadableFiles = append(result.UnreadableFiles, jar)
+			unreadableJars[jar] = true
+			continue
 		}
+		if fi.Size() == 0 {
+			result.EmptyJars = append(result.EmptyJars, jar)
+			emptyJars[jar] = true
+			continue
+		}
+
+		h512, err512 := mod.ComputeSHA512(fullPath)
+		if err512 != nil || h512 == "" {
+			result.UnreadableFiles = append(result.UnreadableFiles, jar)
+			unreadableJars[jar] = true
+			continue
+		}
+		sha512ToName[h512] = jar
+		nameToSha512[jar] = h512
+		sha512List = append(sha512List, h512)
+
 		h1, err1 := mod.ComputeSHA1(fullPath)
 		if err1 == nil && h1 != "" {
 			sha1ToName[h1] = jar
@@ -120,7 +140,6 @@ func (s *LocalSynchronizer) Sync(opts LocalSyncOptions) (*SyncResult, error) {
 		lock = &config.Lockfile{Mods: []config.LockfileMod{}}
 	}
 
-	result := &SyncResult{}
 	matchedJars := make(map[string]bool)
 
 	// Process matched versions
@@ -212,10 +231,7 @@ func (s *LocalSynchronizer) Sync(opts LocalSyncOptions) (*SyncResult, error) {
 			}
 		}
 
-		disabled := strings.HasSuffix(strings.ToLower(jarName), ".disabled")
-		if existing != nil && existing.Disabled {
-			disabled = true
-		}
+		disabled := strings.HasSuffix(strings.ToLower(jarName), ".jar.disabled")
 
 		entry := config.LockfileMod{
 			Slug:          slug,
@@ -240,7 +256,7 @@ func (s *LocalSynchronizer) Sync(opts LocalSyncOptions) (*SyncResult, error) {
 
 	// 6. Identify unrecognized JAR files
 	for _, jar := range jarFiles {
-		if !matchedJars[jar] {
+		if !matchedJars[jar] && !unreadableJars[jar] && !emptyJars[jar] {
 			result.UnknownJars = append(result.UnknownJars, jar)
 		}
 	}

@@ -27,16 +27,18 @@ const (
 
 // ModDiffEntry represents the difference status for a single mod.
 type ModDiffEntry struct {
-	Slug          string       `json:"slug"`
-	Name          string       `json:"name"`
-	Category      DiffCategory `json:"category"`
-	Status        string       `json:"status"` // "[OK]", "[MISMATCH]", "[CLIENT]", "[SERVER]", "[MISSING]"
-	LocalVersion  string       `json:"local_version,omitempty"`
-	RemoteVersion string       `json:"remote_version,omitempty"`
-	LocalSide     string       `json:"local_side,omitempty"`
-	RemoteSide    string       `json:"remote_side,omitempty"`
-	MissingOn     string       `json:"missing_on,omitempty"` // "server" or "client"
-	Notes         string       `json:"notes,omitempty"`
+	Slug           string       `json:"slug"`
+	Name           string       `json:"name"`
+	Category       DiffCategory `json:"category"`
+	Status         string       `json:"status"` // "[OK]", "[MISMATCH]", "[CLIENT]", "[SERVER]", "[MISSING]"
+	LocalVersion   string       `json:"local_version,omitempty"`
+	RemoteVersion  string       `json:"remote_version,omitempty"`
+	LocalSide      string       `json:"local_side,omitempty"`
+	RemoteSide     string       `json:"remote_side,omitempty"`
+	LocalDisabled  bool         `json:"local_disabled,omitempty"`
+	RemoteDisabled bool         `json:"remote_disabled,omitempty"`
+	MissingOn      string       `json:"missing_on,omitempty"` // "server" or "client"
+	Notes          string       `json:"notes,omitempty"`
 }
 
 // DiffResult captures the full comparison summary and mod-by-mod entries.
@@ -211,17 +213,37 @@ func (e *DiffEngine) CompareLockfiles(leftLock, rightLock *config.Lockfile) *Dif
 			entry.RemoteVersion = rVer
 			entry.LocalSide = config.NormalizeSide(l.Side)
 			entry.RemoteSide = config.NormalizeSide(r.Side)
+			entry.LocalDisabled = l.Disabled
+			entry.RemoteDisabled = r.Disabled
 
-			if lVer == rVer || (lVer == "" && rVer == "") {
-				entry.Category = DiffOK
-				entry.Status = "[OK]"
-				entry.Notes = "Synchronized"
-				res.Synchronized++
-			} else {
+			if lVer != rVer && !(lVer == "" && rVer == "") {
 				entry.Category = DiffMismatch
 				entry.Status = "[MISMATCH]"
 				entry.Notes = fmt.Sprintf("Version mismatch (client: %s vs server: %s)", lVer, rVer)
 				res.Mismatches++
+			} else if l.Disabled != r.Disabled {
+				entry.Category = DiffMismatch
+				entry.Status = "[MISMATCH]"
+				if l.Disabled {
+					entry.Notes = "Status mismatch: disabled locally, enabled remotely"
+				} else {
+					entry.Notes = "Status mismatch: enabled locally, disabled remotely"
+				}
+				res.Mismatches++
+			} else if l.SHA512 != "" && r.SHA512 != "" && !strings.EqualFold(l.SHA512, r.SHA512) {
+				entry.Category = DiffMismatch
+				entry.Status = "[MISMATCH]"
+				entry.Notes = "Checksum mismatch: SHA-512 hashes differ"
+				res.Mismatches++
+			} else {
+				entry.Category = DiffOK
+				entry.Status = "[OK]"
+				if l.Disabled {
+					entry.Notes = "Synchronized (disabled)"
+				} else {
+					entry.Notes = "Synchronized"
+				}
+				res.Synchronized++
 			}
 			res.Entries = append(res.Entries, entry)
 		} else {
@@ -235,9 +257,10 @@ func (e *DiffEngine) CompareLockfiles(leftLock, rightLock *config.Lockfile) *Dif
 			entry.Name = name
 			entry.LocalVersion = lVer
 			entry.LocalSide = config.NormalizeSide(l.Side)
+			entry.LocalDisabled = l.Disabled
 
 			normSide := strings.ToLower(config.NormalizeSide(l.Side))
-			if strings.HasPrefix(normSide, "client only") || normSide == "client" {
+			if strings.HasPrefix(normSide, "client") && !strings.Contains(normSide, "client & server") && !strings.Contains(normSide, "both") {
 				entry.Category = DiffClient
 				entry.Status = "[CLIENT]"
 				entry.Notes = "Client-only mod (omitted on server)"
@@ -268,9 +291,10 @@ func (e *DiffEngine) CompareLockfiles(leftLock, rightLock *config.Lockfile) *Dif
 		entry.Name = name
 		entry.RemoteVersion = rVer
 		entry.RemoteSide = config.NormalizeSide(r.Side)
+		entry.RemoteDisabled = r.Disabled
 
 		normSide := strings.ToLower(config.NormalizeSide(r.Side))
-		if strings.HasPrefix(normSide, "server only") || normSide == "server" {
+		if strings.HasPrefix(normSide, "server") && !strings.Contains(normSide, "client & server") && !strings.Contains(normSide, "both") {
 			entry.Category = DiffServer
 			entry.Status = "[SERVER]"
 			entry.Notes = "Server-only mod (omitted on client)"

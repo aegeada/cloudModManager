@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -52,7 +53,7 @@ func NewServer(port int, token string, lockPath string) *Server {
 	if lockPath == "" {
 		lockPath = "cmm.lock"
 	}
-	return &Server{
+	s := &Server{
 		Port:       port,
 		Token:      token,
 		LockPath:   lockPath,
@@ -60,6 +61,27 @@ func NewServer(port int, token string, lockPath string) *Server {
 		ModsDir:    "mods",
 		ConfigDir:  "config",
 	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/lock", s.HandleLock)
+	mux.HandleFunc("/health", s.HandleHealth)
+	mux.HandleFunc("/push", s.HandlePush)
+
+	s.httpServer = &http.Server{
+		Addr:              fmt.Sprintf(":%d", port),
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	return s
+}
+
+// HTTPServer returns the internal http.Server instance for inspection.
+func (s *Server) HTTPServer() *http.Server {
+	return s.httpServer
 }
 
 // HandleLock handles GET /lock requests to return the server lockfile.
@@ -78,7 +100,7 @@ func (s *Server) HandleLock(w http.ResponseWriter, r *http.Request) {
 			reqToken = authHeader
 		}
 
-		if reqToken == "" || reqToken != s.Token {
+		if reqToken == "" || subtle.ConstantTimeCompare([]byte(reqToken), []byte(s.Token)) != 1 {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="cmm"`)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
@@ -116,21 +138,25 @@ func (s *Server) HandlePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Authenticate request via Bearer token
-	if s.Token != "" {
-		authHeader := r.Header.Get("Authorization")
-		var reqToken string
-		if strings.HasPrefix(authHeader, "Bearer ") {
-			reqToken = strings.TrimPrefix(authHeader, "Bearer ")
-		} else {
-			reqToken = authHeader
-		}
+	// 1. Authenticate request via Bearer token (mutations require configured token)
+	if s.Token == "" {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="cmm"`)
+		http.Error(w, "Unauthorized: push requires configured authentication token", http.StatusUnauthorized)
+		return
+	}
 
-		if reqToken == "" || reqToken != s.Token {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="cmm"`)
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
+	authHeader := r.Header.Get("Authorization")
+	var reqToken string
+	if strings.HasPrefix(authHeader, "Bearer ") {
+		reqToken = strings.TrimPrefix(authHeader, "Bearer ")
+	} else {
+		reqToken = authHeader
+	}
+
+	if reqToken == "" || subtle.ConstantTimeCompare([]byte(reqToken), []byte(s.Token)) != 1 {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="cmm"`)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
 	}
 
 	s.mu.Lock()
@@ -445,12 +471,18 @@ func ExtractConfigZip(zipReader *zip.Reader, destDir string) (int, error) {
 		}
 
 		// Security: Defend against decompression bombs (max 50MB per file)
-		_, copyErr := io.Copy(outFile, io.LimitReader(rc, 50<<20))
+		const maxDecompressedBytes = 50 << 20 // 50MB
+		written, copyErr := io.Copy(outFile, io.LimitReader(rc, maxDecompressedBytes+1))
 		rc.Close()
 		outFile.Close()
 
 		if copyErr != nil {
+			_ = os.Remove(targetPath)
 			return count, fmt.Errorf("failed to write file '%s': %w", targetPath, copyErr)
+		}
+		if written > maxDecompressedBytes {
+			_ = os.Remove(targetPath)
+			return count, fmt.Errorf("security violation: decompressed file '%s' exceeds 50MB limit", f.Name)
 		}
 		count++
 	}
@@ -490,6 +522,9 @@ func validateConfigZip(zipReader *zip.Reader) (int, error) {
 		}
 
 		if !f.FileInfo().IsDir() {
+			if f.UncompressedSize64 > 50<<20 {
+				return count, fmt.Errorf("security violation: uncompressed file '%s' exceeds 50MB limit", f.Name)
+			}
 			count++
 		}
 	}
@@ -567,8 +602,12 @@ func (s *Server) Start() error {
 
 	addr := fmt.Sprintf(":%d", s.Port)
 	s.httpServer = &http.Server{
-		Addr:    addr,
-		Handler: mux,
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	sigChan := make(chan os.Signal, 1)
@@ -588,7 +627,7 @@ func (s *Server) Start() error {
 		return fmt.Errorf("server error on port %d: %w", s.Port, err)
 	case sig := <-sigChan:
 		fmt.Printf("\nReceived signal %s, initiating graceful shutdown...\n", sig)
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
 		if err := s.httpServer.Shutdown(ctx); err != nil {

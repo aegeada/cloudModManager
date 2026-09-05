@@ -9,19 +9,22 @@ import (
 	"cmm/internal/config"
 )
 
-// LifecycleResult holds the outcome of an enable/disable operation.
-type LifecycleResult struct {
-	ModName      string
-	Slug         string
-	OldFileName  string
-	NewFileName  string
-	Disabled     bool
-	Warning      string
-	DependentMods []string
+// DetectActiveDependents finds all active installed mods in lockfile that have a required dependency on targetSlugOrID.
+func (m *Manager) DetectActiveDependents(slugOrID string, lock *config.Lockfile) ([]string, error) {
+	resolver := m.Resolver
+	if resolver == nil {
+		resolver = NewDependencyResolver(m.Client)
+	}
+	return resolver.DetectActiveDependents(slugOrID, lock)
 }
 
 // DisableMod disables a mod by renaming its file to .jar.disabled and updating cmm.lock.
-func (m *Manager) DisableMod(slugOrID string, force bool) (*LifecycleResult, error) {
+func (m *Manager) DisableMod(slugOrID string, force bool) (*DisableResult, error) {
+	return m.DisableModWithOptions(slugOrID, DisableOptions{Force: force})
+}
+
+// DisableModWithOptions disables a mod according to DisableOptions.
+func (m *Manager) DisableModWithOptions(slugOrID string, opts DisableOptions) (*DisableResult, error) {
 	lock, err := config.LoadLockfile(m.LockPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load lockfile '%s': %w", m.LockPath, err)
@@ -33,24 +36,23 @@ func (m *Manager) DisableMod(slugOrID string, force bool) (*LifecycleResult, err
 	}
 
 	if target.Disabled {
-		return &LifecycleResult{
-			ModName:     target.Name,
-			Slug:        target.Slug,
-			OldFileName: target.FileName,
-			NewFileName: target.FileName,
-			Disabled:    true,
-			Warning:     fmt.Sprintf("Mod '%s' is already disabled.", target.Name),
+		return &DisableResult{
+			Slug:            target.Slug,
+			Name:            target.Name,
+			OldFileName:     target.FileName,
+			NewFileName:     target.FileName,
+			AlreadyDisabled: true,
 		}, nil
 	}
 
-	// Check if any other active mods depend on this mod
-	var dependents []string
-	// Find dependents if client is available
-	// Also inspect lockfile for potential dependent tags or relationships
-	cfg := m.loadConfig()
-	modsDir := "mods"
-	if cfg != nil && cfg.Paths.ModsDir != "" {
-		modsDir = cfg.Paths.ModsDir
+	// Detect active dependents
+	resolver := m.Resolver
+	if resolver == nil {
+		resolver = NewDependencyResolver(m.Client)
+	}
+	dependents, _ := resolver.DetectActiveDependents(slugOrID, lock)
+	if len(dependents) == 0 && target.Slug != slugOrID {
+		dependents, _ = resolver.DetectActiveDependents(target.Slug, lock)
 	}
 
 	curFileName := target.FileName
@@ -63,6 +65,35 @@ func (m *Manager) DisableMod(slugOrID string, force bool) (*LifecycleResult, err
 		cleanBase = cleanBase + ".jar"
 	}
 	newFileName := cleanBase + ".disabled"
+
+	// If active dependents exist and !opts.Force, return warning and DO NOT modify disk or lockfile
+	if len(dependents) > 0 && !opts.Force {
+		return &DisableResult{
+			Slug:                 target.Slug,
+			Name:                 target.Name,
+			OldFileName:          curFileName,
+			NewFileName:          curFileName,
+			HasDependentsWarning: true,
+			ActiveDependents:     dependents,
+		}, nil
+	}
+
+	if opts.DryRun {
+		return &DisableResult{
+			Slug:             target.Slug,
+			Name:             target.Name,
+			OldFileName:      curFileName,
+			NewFileName:      newFileName,
+			DryRun:           true,
+			ActiveDependents: dependents,
+		}, nil
+	}
+
+	cfg := m.loadConfig()
+	modsDir := "mods"
+	if cfg != nil && cfg.Paths.ModsDir != "" {
+		modsDir = cfg.Paths.ModsDir
+	}
 
 	oldPath := filepath.Join(modsDir, cleanBase)
 	newPath := filepath.Join(modsDir, newFileName)
@@ -82,18 +113,22 @@ func (m *Manager) DisableMod(slugOrID string, force bool) (*LifecycleResult, err
 		return nil, fmt.Errorf("failed to save lockfile: %w", err)
 	}
 
-	return &LifecycleResult{
-		ModName:       target.Name,
-		Slug:          target.Slug,
-		OldFileName:   curFileName,
-		NewFileName:   newFileName,
-		Disabled:      true,
-		DependentMods: dependents,
+	return &DisableResult{
+		Slug:             target.Slug,
+		Name:             target.Name,
+		OldFileName:      curFileName,
+		NewFileName:      newFileName,
+		ActiveDependents: dependents,
 	}, nil
 }
 
 // EnableMod enables a mod by renaming its file from .jar.disabled to .jar and updating cmm.lock.
-func (m *Manager) EnableMod(slugOrID string) (*LifecycleResult, error) {
+func (m *Manager) EnableMod(slugOrID string) (*EnableResult, error) {
+	return m.EnableModWithOptions(slugOrID, EnableOptions{})
+}
+
+// EnableModWithOptions enables a mod according to EnableOptions.
+func (m *Manager) EnableModWithOptions(slugOrID string, opts EnableOptions) (*EnableResult, error) {
 	lock, err := config.LoadLockfile(m.LockPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load lockfile '%s': %w", m.LockPath, err)
@@ -105,13 +140,12 @@ func (m *Manager) EnableMod(slugOrID string) (*LifecycleResult, error) {
 	}
 
 	if !target.Disabled && strings.HasSuffix(target.FileName, ".jar") {
-		return &LifecycleResult{
-			ModName:     target.Name,
-			Slug:        target.Slug,
-			OldFileName: target.FileName,
-			NewFileName: target.FileName,
-			Disabled:    false,
-			Warning:     fmt.Sprintf("Mod '%s' is already enabled.", target.Name),
+		return &EnableResult{
+			Slug:           target.Slug,
+			Name:           target.Name,
+			OldFileName:    target.FileName,
+			NewFileName:    target.FileName,
+			AlreadyEnabled: true,
 		}, nil
 	}
 
@@ -129,6 +163,16 @@ func (m *Manager) EnableMod(slugOrID string) (*LifecycleResult, error) {
 	newFileName := strings.TrimSuffix(curFileName, ".disabled")
 	if !strings.HasSuffix(newFileName, ".jar") {
 		newFileName = newFileName + ".jar"
+	}
+
+	if opts.DryRun {
+		return &EnableResult{
+			Slug:        target.Slug,
+			Name:        target.Name,
+			OldFileName: curFileName,
+			NewFileName: newFileName,
+			DryRun:      true,
+		}, nil
 	}
 
 	oldPath := filepath.Join(modsDir, curFileName)
@@ -149,11 +193,10 @@ func (m *Manager) EnableMod(slugOrID string) (*LifecycleResult, error) {
 		return nil, fmt.Errorf("failed to save lockfile: %w", err)
 	}
 
-	return &LifecycleResult{
-		ModName:     target.Name,
+	return &EnableResult{
 		Slug:        target.Slug,
+		Name:        target.Name,
 		OldFileName: curFileName,
 		NewFileName: newFileName,
-		Disabled:    false,
 	}, nil
 }

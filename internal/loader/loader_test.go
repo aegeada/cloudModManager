@@ -143,3 +143,102 @@ func TestInstallLoader(t *testing.T) {
 		t.Fatalf("InstallLoader neoforge failed: %v", err)
 	}
 }
+
+func TestCheckLatestLoaderVersion(t *testing.T) {
+	_, cleanup := setupMockFabricMetaServer(t)
+	defer cleanup()
+
+	// 1. Current version empty -> update available
+	latest, updateAvailable, err := CheckLatestLoaderVersion("fabric", "")
+	if err != nil {
+		t.Fatalf("CheckLatestLoaderVersion failed: %v", err)
+	}
+	if latest != "0.19.3" || !updateAvailable {
+		t.Errorf("expected 0.19.3 with updateAvailable=true, got %s, %v", latest, updateAvailable)
+	}
+
+	// 2. Current version older -> update available
+	latest, updateAvailable, err = CheckLatestLoaderVersion("fabric", "0.19.2")
+	if err != nil {
+		t.Fatalf("CheckLatestLoaderVersion failed: %v", err)
+	}
+	if latest != "0.19.3" || !updateAvailable {
+		t.Errorf("expected 0.19.3 with updateAvailable=true, got %s, %v", latest, updateAvailable)
+	}
+
+	// 3. Current version older with 'v' prefix -> update available
+	latest, updateAvailable, err = CheckLatestLoaderVersion("fabric", "v0.19.2")
+	if err != nil {
+		t.Fatalf("CheckLatestLoaderVersion failed: %v", err)
+	}
+	if latest != "0.19.3" || !updateAvailable {
+		t.Errorf("expected 0.19.3 with updateAvailable=true, got %s, %v", latest, updateAvailable)
+	}
+
+	// 4. Current version equal to latest -> no update
+	latest, updateAvailable, err = CheckLatestLoaderVersion("fabric", "0.19.3")
+	if err != nil {
+		t.Fatalf("CheckLatestLoaderVersion failed: %v", err)
+	}
+	if latest != "0.19.3" || updateAvailable {
+		t.Errorf("expected 0.19.3 with updateAvailable=false, got %s, %v", latest, updateAvailable)
+	}
+
+	// 5. Current version newer (e.g. unreleased snapshot 0.20.0) -> NO downgrade update!
+	latest, updateAvailable, err = CheckLatestLoaderVersion("fabric", "0.20.0")
+	if err != nil {
+		t.Fatalf("CheckLatestLoaderVersion failed: %v", err)
+	}
+	if latest != "0.19.3" || updateAvailable {
+		t.Errorf("expected 0.19.3 with updateAvailable=false (prevent downgrade), got %s, %v", latest, updateAvailable)
+	}
+
+	// 6. Non-fabric loader
+	latest, updateAvailable, err = CheckLatestLoaderVersion("forge", "1.0.0")
+	if err != nil {
+		t.Fatalf("unexpected error for forge: %v", err)
+	}
+	if updateAvailable {
+		t.Errorf("expected updateAvailable=false for unsupported check, got %v", updateAvailable)
+	}
+}
+
+func TestIsServerOrMinecraftRunning(t *testing.T) {
+	// 1. Test mock environment variable
+	origEnv := os.Getenv("CMM_MOCK_SERVER_RUNNING")
+	defer func() {
+		if origEnv != "" {
+			os.Setenv("CMM_MOCK_SERVER_RUNNING", origEnv)
+		} else {
+			os.Unsetenv("CMM_MOCK_SERVER_RUNNING")
+		}
+	}()
+
+	os.Setenv("CMM_MOCK_SERVER_RUNNING", "1")
+	if !IsServerOrMinecraftRunning() {
+		t.Errorf("expected IsServerOrMinecraftRunning to return true when CMM_MOCK_SERVER_RUNNING=1")
+	}
+
+	os.Setenv("CMM_MOCK_SERVER_RUNNING", "true")
+	if !IsServerOrMinecraftRunning() {
+		t.Errorf("expected IsServerOrMinecraftRunning to return true when CMM_MOCK_SERVER_RUNNING=true")
+	}
+
+	os.Unsetenv("CMM_MOCK_SERVER_RUNNING")
+
+	// 2. Test ProcessChecker override
+	origChecker := ProcessChecker
+	defer func() {
+		ProcessChecker = origChecker
+	}()
+
+	ProcessChecker = func() bool { return true }
+	if !IsServerOrMinecraftRunning() {
+		t.Errorf("expected IsServerOrMinecraftRunning to return true with overridden checker")
+	}
+
+	ProcessChecker = func() bool { return false }
+	if IsServerOrMinecraftRunning() {
+		t.Errorf("expected IsServerOrMinecraftRunning to return false with overridden checker")
+	}
+}

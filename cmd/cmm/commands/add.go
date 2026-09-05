@@ -10,6 +10,7 @@ import (
 	"cmm/internal/config"
 	"cmm/internal/mod"
 	"cmm/internal/modrinth"
+	"cmm/internal/tui/tea"
 	"github.com/spf13/cobra"
 )
 
@@ -18,6 +19,27 @@ var (
 	addChannel string
 	addYes     bool
 )
+
+func isTerminal(f *os.File) bool {
+	if f == nil {
+		return false
+	}
+	if os.Getenv("TERM") == "dumb" {
+		return false
+	}
+	if devNull, err := os.Open(os.DevNull); err == nil {
+		defer devNull.Close()
+		if fStat, err1 := f.Stat(); err1 == nil {
+			if nullStat, err2 := devNull.Stat(); err2 == nil && os.SameFile(fStat, nullStat) {
+				return false
+			}
+		}
+	}
+	if stat, err := f.Stat(); err == nil && (stat.Mode()&os.ModeCharDevice) == 0 {
+		return false
+	}
+	return tea.IsTerminal(f)
+}
 
 var addCmd = &cobra.Command{
 	Use:     "add <slug...>",
@@ -44,17 +66,19 @@ var addCmd = &cobra.Command{
 		mgr := mod.NewManager(client, "cmm.toml", "cmm.lock")
 		reader := bufio.NewReader(os.Stdin)
 
-		stat, statErr := os.Stdin.Stat()
-		isNonTerminal := (statErr == nil && (stat.Mode()&os.ModeCharDevice) == 0)
+		isNonTerminal := !isTerminal(os.Stdin)
 
 		askConfirm := func(prompt string, defTrue bool) bool {
-			if addYes || isNonTerminal {
-				return defTrue
+			if addYes {
+				return true
 			}
 			fmt.Print(prompt)
 			input, err := reader.ReadString('\n')
 			if err != nil && input == "" {
-				return defTrue
+				if isNonTerminal {
+					return defTrue
+				}
+				return false
 			}
 			input = strings.TrimSpace(strings.ToLower(input))
 			if input == "" {
@@ -164,7 +188,9 @@ var addCmd = &cobra.Command{
 			targetFile := ""
 			if err == nil {
 				for _, v := range versions {
-					if strings.EqualFold(v.VersionNumber, addVersion) || strings.EqualFold(v.ID, addVersion) {
+					if strings.EqualFold(v.VersionNumber, addVersion) ||
+						strings.EqualFold(v.ID, addVersion) ||
+						strings.EqualFold(strings.TrimPrefix(v.VersionNumber, "v"), strings.TrimPrefix(addVersion, "v")) {
 						if len(v.Files) > 0 {
 							targetFile = v.Files[0].Filename
 						}
@@ -255,12 +281,21 @@ var addCmd = &cobra.Command{
 				page+1, totalPages, start+1, end, totalVersions)
 			fmt.Printf("Select version [1-%d]: ", (end - start))
 
-			input, _ := reader.ReadString('\n')
-			input = strings.TrimSpace(strings.ToLower(input))
-
-			if addYes || (isNonTerminal && input == "") {
+			if addYes {
 				selectedVersion = &versions[0]
 				break
+			}
+
+			input, err := reader.ReadString('\n')
+			input = strings.TrimSpace(strings.ToLower(input))
+
+			if err != nil && input == "" {
+				if isNonTerminal {
+					selectedVersion = &versions[0]
+					break
+				}
+				fmt.Println("\nInstallation cancelled.")
+				return
 			}
 
 			if input == "q" || input == "quit" || input == "cancel" {

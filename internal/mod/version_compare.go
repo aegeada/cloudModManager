@@ -6,6 +6,11 @@ import (
 	"strings"
 )
 
+// mcPrefixRegex matches Minecraft version prefixes followed by a delimiter and a mod version number.
+// Note: Go's regexp package uses RE2 which does not support Perl-style lookahead (?=...).
+// We capture (v?[0-9]) in group 1 and substitute $1 during replacement to achieve the lookahead behavior.
+var mcPrefixRegex = regexp.MustCompile(`^(?:mc)?1\.(?:1[2-9]|2[0-9])(?:\.[0-9]+)?[-_](v?[0-9])`)
+
 // cleanVersion cleans version string by trimming 'v', 'mc' prefixes and build metadata.
 func cleanVersion(v string) (core string, prerelease string) {
 	v = strings.TrimSpace(v)
@@ -17,6 +22,11 @@ func cleanVersion(v string) (core string, prerelease string) {
 		v = v[:idx]
 	}
 
+	// Strip common prefixes like mc1.21- or 1.21.1_ only when followed by a mod version number
+	v = mcPrefixRegex.ReplaceAllString(v, "$1")
+	v = strings.TrimPrefix(v, "v")
+	v = strings.TrimPrefix(v, "V")
+
 	// Split core and pre-release (e.g., 1.3.8-beta.1)
 	if idx := strings.Index(v, "-"); idx != -1 {
 		core = v[:idx]
@@ -24,10 +34,6 @@ func cleanVersion(v string) (core string, prerelease string) {
 	} else {
 		core = v
 	}
-
-	// Strip common prefixes like mc1.21- or 1.21.1_ from core if followed by delimiter
-	mcPrefixRegex := regexp.MustCompile(`^(?:mc)?1\.(?:1[2-9]|2[0-9])(?:\.[0-9]+)?[-_]`)
-	core = mcPrefixRegex.ReplaceAllString(core, "")
 
 	return core, prerelease
 }
@@ -42,9 +48,10 @@ func parseParts(s string) []string {
 
 // CompareVersions compares two version strings according to SemVer principles.
 // Returns:
-//   1 if v1 > v2
-//  -1 if v1 < v2
-//   0 if v1 == v2
+//
+//	 1 if v1 > v2
+//	-1 if v1 < v2
+//	 0 if v1 == v2
 func CompareVersions(v1, v2 string) int {
 	if strings.EqualFold(strings.TrimSpace(v1), strings.TrimSpace(v2)) {
 		return 0

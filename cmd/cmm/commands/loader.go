@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"strings"
@@ -13,6 +14,7 @@ import (
 var (
 	loaderVersion string
 	loaderForce   bool
+	loaderYes     bool
 )
 
 var loaderCmd = &cobra.Command{
@@ -55,6 +57,11 @@ var loaderInstallCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		targetLoader := args[0]
+
+		if !loaderForce && loader.IsServerOrMinecraftRunning() {
+			fmt.Fprintf(os.Stderr, "Error: Server is currently running. Please stop the server before installing the loader (or use --force).\n")
+			os.Exit(1)
+		}
 
 		if err := loader.InstallLoader("cmm.toml", targetLoader, loaderVersion); err != nil {
 			fmt.Fprintf(os.Stderr, "Error installing loader version: %v\n", err)
@@ -113,13 +120,19 @@ var loaderUpdateCmd = &cobra.Command{
 		fmt.Printf("Current %s Loader: v%s\n", strings.Title(targetLoader), currVer)
 		fmt.Printf("Latest %s Loader:  v%s\n", strings.Title(targetLoader), latestVer)
 
-		fmt.Printf("Update %s Loader to v%s? [y/N]: ", strings.Title(targetLoader), latestVer)
-		var input string
-		fmt.Scanln(&input)
-		input = strings.TrimSpace(strings.ToLower(input))
-		if input != "y" && input != "yes" {
-			fmt.Println("Loader update cancelled.")
-			return
+		if !loaderYes {
+			fmt.Printf("Update %s Loader to v%s? [y/N]: ", strings.Title(targetLoader), latestVer)
+			reader := bufio.NewReader(os.Stdin)
+			input, err := reader.ReadString('\n')
+			if err != nil && input == "" {
+				fmt.Println("Loader update cancelled.")
+				return
+			}
+			input = strings.TrimSpace(strings.ToLower(input))
+			if input != "y" && input != "yes" {
+				fmt.Println("Loader update cancelled.")
+				return
+			}
 		}
 
 		if err := loader.InstallLoader("cmm.toml", targetLoader, latestVer); err != nil {
@@ -137,5 +150,7 @@ func init() {
 	loaderCmd.AddCommand(loaderInstallCmd)
 	loaderCmd.AddCommand(loaderUpdateCmd)
 	loaderInstallCmd.Flags().StringVarP(&loaderVersion, "version", "v", "", "Specific loader version")
+	loaderInstallCmd.Flags().BoolVarP(&loaderForce, "force", "f", false, "Force install even if server is running")
 	loaderUpdateCmd.Flags().BoolVarP(&loaderForce, "force", "f", false, "Force update even if server is running")
+	loaderUpdateCmd.Flags().BoolVarP(&loaderYes, "yes", "y", false, "Automatically confirm loader update")
 }

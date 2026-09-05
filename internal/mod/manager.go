@@ -14,6 +14,7 @@ type Manager struct {
 	Client     *modrinth.Client
 	ConfigPath string
 	LockPath   string
+	Resolver   *DependencyResolver
 }
 
 func NewManager(client *modrinth.Client, configPath, lockPath string) *Manager {
@@ -27,6 +28,7 @@ func NewManager(client *modrinth.Client, configPath, lockPath string) *Manager {
 		Client:     client,
 		ConfigPath: configPath,
 		LockPath:   lockPath,
+		Resolver:   NewDependencyResolver(client),
 	}
 }
 
@@ -57,7 +59,9 @@ func (m *Manager) AddWithChannelAndReplace(slugOrID string, targetVersion string
 	lock := m.loadLockfile()
 
 	// Check if mod is already installed
-	if existing := lock.GetMod(slugOrID); existing != nil {
+	existing := lock.GetMod(slugOrID)
+	wasExisting := (existing != nil)
+	if wasExisting {
 		if !allowReplace {
 			return &AddResult{
 				AlreadyInstalled: true,
@@ -74,11 +78,27 @@ func (m *Manager) AddWithChannelAndReplace(slugOrID string, targetVersion string
 
 	// Server-side check skipped client-only mod
 	if len(installQueue) == 0 && targetProj != nil && strings.EqualFold(cfg.Profile.Side, "server") && strings.EqualFold(targetProj.ServerSide, "unsupported") {
+		ver := targetVersion
+		if ver == "" {
+			if vs, err := m.Client.GetProjectVersions(targetProj.ID, nil, nil, nil); err == nil && len(vs) > 0 {
+				ver = vs[0].VersionNumber
+			}
+		}
+		if wasExisting && allowReplace && existing != nil && existing.FileName != "" {
+			modsDir := cfg.Paths.ModsDir
+			if modsDir == "" {
+				modsDir = "mods"
+			}
+			_ = os.Remove(filepath.Join(modsDir, existing.FileName))
+		}
 		return &AddResult{
 			SkippedClientOnly: true,
+			Replaced:          wasExisting && allowReplace,
 			InstalledMod: &config.LockfileMod{
-				Slug: targetProj.Slug,
-				Name: targetProj.Title,
+				Slug:          targetProj.Slug,
+				Name:          targetProj.Title,
+				VersionNumber: ver,
+				Version:       ver,
 			},
 		}, nil
 	}
@@ -95,20 +115,52 @@ func (m *Manager) AddWithChannelAndReplace(slugOrID string, targetVersion string
 		OptionalDeps: optionalDeps,
 	}
 
-	// If replacing an existing mod, remove previous JAR file from disk
-	if existing := lock.GetMod(slugOrID); existing != nil && allowReplace {
-		res.Replaced = true
-		if existing.FileName != "" {
-			_ = os.Remove(filepath.Join(modsDir, existing.FileName))
+	var filesToCleanup []string
+	var downloadedTmpFiles []string
+	defer func() {
+		for _, tmp := range downloadedTmpFiles {
+			_ = os.Remove(tmp)
 		}
-	}
+	}()
 
 	for _, item := range installQueue {
-		destPath := filepath.Join(modsDir, item.File.Filename)
+		isPinned := false
+		isDisabled := false
+		var oldFileName string
+		if existing := lock.GetMod(item.Project.Slug); existing != nil {
+			isPinned = existing.Pinned
+			isDisabled = existing.Disabled
+			oldFileName = existing.FileName
+		} else if existing := lock.GetMod(item.Project.ID); existing != nil {
+			isPinned = existing.Pinned
+			isDisabled = existing.Disabled
+			oldFileName = existing.FileName
+		}
+
+		targetFileName := item.File.Filename
+		if isDisabled && !strings.HasSuffix(strings.ToLower(targetFileName), ".disabled") {
+			targetFileName += ".disabled"
+		}
+
+		destPath := filepath.Join(modsDir, targetFileName)
+		tmpDestPath := filepath.Join(modsDir, targetFileName+".tmp")
+		downloadedTmpFiles = append(downloadedTmpFiles, tmpDestPath)
 		sha512 := item.File.Hashes["sha512"]
 
-		if err := m.Client.DownloadFile(item.File.URL, destPath, sha512); err != nil {
+		// Download to .tmp first and verify hash
+		if err := m.Client.DownloadFile(item.File.URL, tmpDestPath, sha512); err != nil {
 			return nil, fmt.Errorf("failed to download file '%s': %w", item.File.Filename, err)
+		}
+
+		// Atomically rename .tmp to destination
+		if err := os.Rename(tmpDestPath, destPath); err != nil {
+			return nil, fmt.Errorf("failed to install file '%s': %w", targetFileName, err)
+		}
+
+		downloadedTmpFiles = downloadedTmpFiles[:len(downloadedTmpFiles)-1]
+
+		if oldFileName != "" && oldFileName != targetFileName {
+			filesToCleanup = append(filesToCleanup, filepath.Join(modsDir, oldFileName))
 		}
 
 		clientSide := item.Project.ClientSide
@@ -123,13 +175,14 @@ func (m *Manager) AddWithChannelAndReplace(slugOrID string, targetVersion string
 			VersionID:     item.Version.ID,
 			VersionNumber: item.Version.VersionNumber,
 			Version:       item.Version.VersionNumber,
-			FileName:      item.File.Filename,
+			FileName:      targetFileName,
 			SHA512:        sha512,
 			DownloadURL:   item.File.URL,
 			ClientSide:    clientSide,
 			ServerSide:    serverSide,
 			Side:          side,
-			Pinned:        false,
+			Pinned:        isPinned,
+			Disabled:      isDisabled,
 		}
 
 		lock.AddOrUpdateMod(entry)
@@ -139,6 +192,13 @@ func (m *Manager) AddWithChannelAndReplace(slugOrID string, targetVersion string
 		} else {
 			res.InstalledDeps = append(res.InstalledDeps, &entry)
 		}
+	}
+
+	if wasExisting && allowReplace {
+		res.Replaced = true
+	}
+	for _, oldPath := range filesToCleanup {
+		_ = os.Remove(oldPath)
 	}
 
 	if err := config.SaveLockfile(m.LockPath, lock); err != nil {
@@ -353,7 +413,7 @@ func (m *Manager) CheckUpdatesMulti(slugs []string, channel string, force bool) 
 			slugMap[strings.ToLower(strings.TrimSpace(s))] = true
 		}
 		for _, mod := range lock.Mods {
-			if slugMap[strings.ToLower(mod.Slug)] || slugMap[strings.ToLower(mod.Name)] {
+			if slugMap[strings.ToLower(mod.Slug)] || slugMap[strings.ToLower(mod.Name)] || (mod.ProjectID != "" && slugMap[strings.ToLower(mod.ProjectID)]) {
 				targets = append(targets, mod)
 			}
 		}
@@ -461,20 +521,43 @@ func (m *Manager) ApplyUpdates(candidates []UpdateCandidate) error {
 		return err
 	}
 
+	var downloadedTmpFiles []string
+	defer func() {
+		for _, tmp := range downloadedTmpFiles {
+			_ = os.Remove(tmp)
+		}
+	}()
+
 	for _, c := range candidates {
 		file, err := selectFile(&c.TargetVersion)
 		if err != nil {
 			return err
 		}
 
-		destPath := filepath.Join(modsDir, file.Filename)
+		targetFileName := file.Filename
+		if c.Mod.Disabled && !strings.HasSuffix(strings.ToLower(targetFileName), ".disabled") {
+			targetFileName += ".disabled"
+		}
+
+		destPath := filepath.Join(modsDir, targetFileName)
+		tmpDestPath := filepath.Join(modsDir, targetFileName+".tmp")
+		downloadedTmpFiles = append(downloadedTmpFiles, tmpDestPath)
 		sha512 := file.Hashes["sha512"]
 
-		if err := m.Client.DownloadFile(file.URL, destPath, sha512); err != nil {
+		// Stage into .tmp first and verify hash
+		if err := m.Client.DownloadFile(file.URL, tmpDestPath, sha512); err != nil {
 			return fmt.Errorf("failed to download update for %s: %w", c.Mod.Slug, err)
 		}
 
-		if c.Mod.FileName != "" && c.Mod.FileName != file.Filename {
+		// Atomically move .tmp to destPath
+		if err := os.Rename(tmpDestPath, destPath); err != nil {
+			return fmt.Errorf("failed to install update for %s: %w", c.Mod.Slug, err)
+		}
+
+		downloadedTmpFiles = downloadedTmpFiles[:len(downloadedTmpFiles)-1]
+
+		// Only remove previous file after download succeeds
+		if c.Mod.FileName != "" && c.Mod.FileName != targetFileName {
 			_ = os.Remove(filepath.Join(modsDir, c.Mod.FileName))
 		}
 
@@ -482,7 +565,7 @@ func (m *Manager) ApplyUpdates(candidates []UpdateCandidate) error {
 		entry.VersionID = c.TargetVersion.ID
 		entry.VersionNumber = c.TargetVersion.VersionNumber
 		entry.Version = c.TargetVersion.VersionNumber
-		entry.FileName = file.Filename
+		entry.FileName = targetFileName
 		entry.SHA512 = sha512
 		entry.DownloadURL = file.URL
 
